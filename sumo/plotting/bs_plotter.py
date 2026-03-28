@@ -248,6 +248,10 @@ class SBSPlotter(BSPlotter):
         dists = data["distances"]
         eners = data["energy"]
 
+        vbm_energy = None
+        if not self.bs.is_metal():
+            vbm_energy = self.bs.get_vbm()["energy"] - data["zero_energy"]
+
         if spin is not None and not self.bs.is_spin_polarized:
             raise ValueError(
                 "Spin-selection only possible with spin-polarised "
@@ -281,10 +285,16 @@ class SBSPlotter(BSPlotter):
 
             if self.bs.is_spin_polarized and spin is None:
                 c = "C1"
-            elif self.bs.is_metal() or np.all(is_vb[nb]):
+            elif self.bs.is_metal():
                 c = "C0"
             else:
-                c = "C1"
+                valence = np.ma.masked_where(e > vbm_energy, e)
+                conduction = np.ma.masked_where(e <= vbm_energy, e)
+                if not np.all(np.ma.getmaskarray(valence)):
+                    ax.plot(dists[nd], valence, ls="-", c="C0", zorder=1)
+                if not np.all(np.ma.getmaskarray(conduction)):
+                    ax.plot(dists[nd], conduction, ls="-", c="C1", zorder=1)
+                continue
 
             ax.plot(dists[nd], e, ls="-", c=c, zorder=1)
 

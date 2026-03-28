@@ -218,6 +218,28 @@ directory with the same *ext* identifier. You can then plot with Sumo::
 
 The usual appearance options are supported.
 
+ABACUS
+~~~~~~
+
+Basic band structure plotting is supported for ABACUS using
+``band.txt``, ``bands1.txt``/``bands2.txt``, or legacy
+``BANDS_*.dat`` output files. Provide the band file directly, or run
+``sumo-bandplot`` in a directory containing ``band.txt``,
+``bands1.txt``, ``BANDS_1.dat``, or the corresponding file under
+``OUT.ABACUS``::
+
+    sumo-bandplot --code abacus -f band.txt
+
+Sumo will also look for ``KPT_BANDS`` (or an explicit-coordinate
+``KPT`` file) to reconstruct the path, ``STRU`` to determine the
+lattice, and ``running_nscf.log`` (falling back to ``running_scf.log``)
+to determine the energy reference. ``KLINES`` is intentionally not used
+for plotting because it only specifies path segments rather than the
+final explicit k-point coordinates.
+
+Projected band structures from ``PBANDS_*`` are not included in this
+first ABACUS backend.
+
 Command-Line Interface
 ----------------------
 

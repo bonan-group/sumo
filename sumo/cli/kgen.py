@@ -19,8 +19,10 @@ import sys
 import numpy as np
 from pymatgen.io.vasp.inputs import Kpoints, Poscar
 
+import sumo.io.abacus
 import sumo.io.questaal
 import sumo.io.vasp
+from sumo.io.abacus import read_structure as read_abacus_structure
 from sumo.io.castep import CastepCell
 from sumo.io.questaal import QuestaalInit, QuestaalSite
 from sumo.symmetry.kpoints import get_path_data
@@ -53,7 +55,7 @@ def kgen(
     kpt_list=None,
     labels=None,
 ):
-    """Generate KPOINTS files for VASP band structure calculations.
+    """Generate high-symmetry band-path files for supported electronic-structure codes.
 
     This script provides a wrapper around several frameworks used to generate
     k-points along a high-symmetry path. The paths found in Bradley and
@@ -67,7 +69,7 @@ def kgen(
         filename (:obj:`str`, optional): Path to VASP structure file. Default
             is ``POSCAR``.
         code (:obj:`str`, optional): Calculation type. Default is 'vasp';
-            'questaal' also supported.
+            'questaal', 'castep', and 'abacus' also supported.
         directory (:obj:`str`, optional): The output file directory.
         make_folders (:obj:`bool`, optional): Generate folders and copy in
             required files (INCAR, POTCAR, POSCAR, and possibly CHGCAR) from
@@ -153,6 +155,14 @@ def kgen(
                 "be set in input .cell file."
             )
         structure = CastepCell.from_file(filename).structure
+    elif code.lower() == "abacus":
+        if cart_coords:
+            logging.warning(
+                "Ignoring request for Cartesian coordinates: "
+                "ABACUS KPT_BANDS is written in Direct coordinates."
+            )
+            cart_coords = False
+        structure = read_abacus_structure(filename)
     else:
         raise ValueError(f'Code "{code}" not recognized.')
 
@@ -189,6 +199,9 @@ def kgen(
             QuestaalInit.from_structure(kpath.prim).to_file(prim_filename)
         elif code.lower() == "castep":
             CastepCell.from_structure(kpath.prim).to_file(prim_filename)
+        elif code.lower() == "abacus":
+            prim_filename = f"{os.path.basename(filename)}_prim.cif"
+            kpath.prim.to(filename=prim_filename)
 
         else:
             kpath.prim.to(filename=prim_filename)
@@ -199,6 +212,20 @@ def kgen(
             "incorrect! Use at your own risk.\n\nThe correct "
             "symmetry primitive structure has been saved as {}.".format(prim_filename)
         )
+
+    if code.lower() == "abacus":
+        if ibzkpt:
+            logging.warning(
+                'Ignoring request to use IBZKPT ("hybrid mode"): '
+                "ABACUS support writes an explicit KPT_BANDS path."
+            )
+            ibzkpt = None
+        if kpts_per_split is not None:
+            logging.warning(
+                "Ignoring request to split k-points: "
+                "ABACUS support writes a single KPT_BANDS file."
+            )
+            kpts_per_split = None
 
     ibz = _parse_ibzkpt(ibzkpt)
 
@@ -249,6 +276,17 @@ def kgen(
             directory=directory,
             cart_coords=cart_coords,
         )
+    elif code.lower() == "abacus":
+        sumo.io.abacus.write_kpoint_files(
+            filename,
+            kpoints,
+            labels,
+            make_folders=make_folders,
+            ibzkpt=ibz,
+            kpts_per_split=kpts_per_split,
+            directory=directory,
+            cart_coords=cart_coords,
+        )
 
 
 def _parse_ibzkpt(ibzkpt):
@@ -269,8 +307,8 @@ def _parse_ibzkpt(ibzkpt):
 def _get_parser():
     parser = argparse.ArgumentParser(
         description="""
-    kgen generates KPOINTS files for running band structure calculations in
-    VASP""",
+    kgen generates high-symmetry band-path files for running band structure
+    calculations""",
         epilog=f"""
     Author: {__author__}
     Version: {__version__}
@@ -288,7 +326,10 @@ def _get_parser():
         "-c",
         "--code",
         default="vasp",
-        help="Electronic structure code (default: vasp)." '"questaal" also supported.',
+        help=(
+            'Electronic structure code (default: vasp). "questaal", '
+            '"castep", and "abacus" also supported.'
+        ),
     )
     parser.add_argument(
         "-d",

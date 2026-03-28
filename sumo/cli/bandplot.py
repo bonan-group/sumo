@@ -10,6 +10,7 @@ import argparse
 import glob
 import logging
 import os
+import re
 import sys
 import warnings
 
@@ -28,6 +29,8 @@ mpl.use("Agg")
 from sumo.cli.dosplot import _atoms, _el_orb
 from sumo.electronic_structure.bandstructure import string_to_spin
 from sumo.electronic_structure.dos import load_dos
+from sumo.io.abacus import band_structure as abacus_band_structure
+from sumo.io.abacus import read_dos as read_abacus_dos
 from sumo.io.castep import band_structure as castep_band_structure
 from sumo.io.castep import read_dos as read_castep_dos
 from sumo.io.questaal import QuestaalSite
@@ -106,6 +109,12 @@ def bandplot(
                 Path to a seedname.bands file. The prefix ("seedname") is used
                 to locate a seedname.cell file in the same directory and read
                 in the positions of high-symmetry points.
+            ABACUS:
+                Path to one or two ABACUS band files, such as band.txt,
+                bands1.txt/bands2.txt, or BANDS_1.dat/BANDS_2.dat. A
+                KPT_BANDS or explicit KPT file,
+                STRU file, and running_nscf.log or running_scf.log should be
+                available in the same directory or its parent directory.
 
             If no filenames are provided, sumo
             will search for vasprun.xml or vasprun.xml.gz files in folders
@@ -114,7 +123,7 @@ def bandplot(
             provided, these will be combined into a single band structure.
 
         code (:obj:`str`, optional): Calculation type. Default is 'vasp';
-            'questaal' and 'castep' also supported (with a reduced
+            'questaal', 'castep', and 'abacus' also supported (with a reduced
             feature-set).
         prefix (:obj:`str`, optional): Prefix for file names.
         directory (:obj:`str`, optional): The directory in which to save files.
@@ -282,9 +291,17 @@ def bandplot(
         method will return a :obj:`list` of filenames written to disk.
     """
     if not filenames:
-        filenames = find_vasprun_files()
+        if code == "vasp":
+            filenames = find_vasprun_files()
+        elif code == "abacus":
+            filenames = find_abacus_band_files()
     elif isinstance(filenames, str):
         filenames = [filenames]
+
+    if code == "abacus" and len(filenames) == 1:
+        filenames = _with_abacus_band_partner(filenames[0])
+
+    _log_selected_paths("Band structure files", filenames)
 
     # only load the orbital projects if we definitely need them
     parse_projected = True if projection_selection else False
@@ -341,6 +358,25 @@ def bandplot(
             labels=bnds_labels,
             coords_are_cartesian=cart_coords,
         )
+    elif code == "abacus":
+        if projection_selection:
+            raise NotImplementedError(
+                "Projected ABACUS bands from PBANDS_* are not supported yet."
+            )
+        kpt_file = find_abacus_file(filenames[0], ("KPT_BANDS", "KPT"))
+        stru_file = find_abacus_file(filenames[0], ("STRU",))
+        log_file = find_abacus_file(
+            filenames[0], ("running_nscf.log", "running_scf.log")
+        )
+        _log_selected_paths("ABACUS k-point file", [kpt_file])
+        _log_selected_paths("ABACUS structure file", [stru_file])
+        _log_selected_paths("ABACUS log file", [log_file])
+        bs = abacus_band_structure(
+            filenames, kpt_file=kpt_file, stru_file=stru_file, log_file=log_file
+        )
+    else:
+        logging.error(f"ERROR: Unrecognised code: {code}")
+        return
 
     # currently not supported as it is a pain to make subplots within subplots,
     # although need to check this is still the case
@@ -403,6 +439,30 @@ def bandplot(
                 lm_orbitals=lm_orbitals,
                 elements=elements,
                 efermi_to_vbm=True,
+            )
+        elif code == "abacus":
+            if scissor:
+                raise ValueError("Scissor not compatabile with ABACUS DOS.")
+            tdos_files = _find_abacus_dos_files(dos_file)
+            pdos_file = find_abacus_file(dos_file, ("PDOS.dat", "PDOS"))
+            stru_file = find_abacus_file(tdos_files[0], ("STRU",))
+            log_file = find_abacus_file(
+                tdos_files[0], ("running_nscf.log", "running_scf.log")
+            )
+            _log_selected_paths("ABACUS DOS file", tdos_files)
+            _log_selected_paths("ABACUS PDOS file", [pdos_file])
+            _log_selected_paths("ABACUS DOS structure file", [stru_file])
+            _log_selected_paths("ABACUS DOS log file", [log_file])
+            dos, pdos = read_abacus_dos(
+                tdos_files,
+                pdos_file=pdos_file,
+                stru_file=stru_file,
+                log_file=log_file,
+                gaussian=gaussian,
+                lm_orbitals=lm_orbitals,
+                elements=elements,
+                atoms=atoms,
+                total_only=total_only,
             )
 
         dos_plotter = SDOSPlotter(dos, pdos)
@@ -514,6 +574,103 @@ def find_vasprun_files():
     return filenames
 
 
+def find_abacus_band_files():
+    """Search for ABACUS band files from the current directory."""
+
+    candidates = [
+        "bands1.txt",
+        os.path.join("OUT.ABACUS", "bands1.txt"),
+        "band.txt",
+        os.path.join("OUT.ABACUS", "band.txt"),
+        "BANDS_1.dat",
+        os.path.join("OUT.ABACUS", "BANDS_1.dat"),
+    ]
+
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return _with_abacus_band_partner(candidate)
+
+    logging.error("ERROR: No ABACUS band file found (looked for bands1.txt, band.txt, BANDS_1.dat)!")
+    sys.exit()
+
+
+def find_abacus_file(reference_file, filenames):
+    """Locate companion ABACUS files relative to an output file."""
+
+    reference_dir = os.path.abspath(os.path.dirname(reference_file))
+    search_dirs = [reference_dir, os.path.dirname(reference_dir)]
+    seen = set()
+
+    for search_dir in search_dirs:
+        if not search_dir or search_dir in seen:
+            continue
+        seen.add(search_dir)
+        for filename in filenames:
+            candidate = os.path.join(search_dir, filename)
+            if os.path.exists(candidate):
+                return candidate
+    return None
+
+
+def _find_abacus_spin_partner(tdos_file):
+    match = re.match(r"(.*[\\/])?(doss)1(.*\.txt)$", tdos_file)
+    if match:
+        candidate = f"{match.group(1) or ''}{match.group(2)}2{match.group(3)}"
+        if os.path.exists(candidate):
+            return candidate
+
+    partners = {
+        "DOS1_smearing.dat": "DOS2_smearing.dat",
+    }
+
+    for source, target in partners.items():
+        candidate = tdos_file.replace(source, target)
+        if candidate != tdos_file and os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def _find_abacus_dos_files(dos_file):
+    partner = _find_abacus_spin_partner(dos_file)
+    return [dos_file, partner] if partner else [dos_file]
+
+
+def _find_abacus_band_partner(band_file):
+    basename = os.path.basename(band_file)
+    dirname = os.path.dirname(band_file)
+
+    matches = (
+        re.match(r"^(bands)([12])(\.txt)$", basename),
+        re.match(r"^(BANDS_)([12])(\.dat)$", basename),
+    )
+
+    for match in matches:
+        if not match:
+            continue
+        partner_index = "1" if match.group(2) == "2" else "2"
+        candidate = os.path.join(
+            dirname, f"{match.group(1)}{partner_index}{match.group(3)}"
+        )
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def _with_abacus_band_partner(band_file):
+    partner = _find_abacus_band_partner(band_file)
+    return sorted([band_file, partner], key=os.path.basename) if partner else [band_file]
+
+
+def _log_selected_paths(label, paths):
+    valid_paths = [path for path in paths if path]
+    if valid_paths:
+        logging.info(f"{label}:")
+        for path in valid_paths:
+            logging.info(f"\t{path}")
+    else:
+        logging.info(f"{label}: None")
+
+
 def save_data_files(bs, prefix=None, directory=None):
     """Write the band structure data files to disk.
 
@@ -611,13 +768,13 @@ def _get_parser():
         default=None,
         nargs="+",
         metavar="F",
-        help="one or more vasprun.xml files to plot",
+        help="input files to plot (e.g. vasprun.xml, *.bands, bnds.ext, band.txt, bands1.txt, BANDS_1.dat)",
     )
     parser.add_argument(
         "-c",
         "--code",
         default="vasp",
-        help="Electronic structure code (default: vasp)." '"questaal" also supported.',
+        help='Electronic structure code (default: vasp). "questaal", "castep", and "abacus" also supported.',
     )
     parser.add_argument(
         "-p", "--prefix", metavar="P", help="prefix for the files generated"

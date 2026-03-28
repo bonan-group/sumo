@@ -239,6 +239,29 @@ orbital-project DOS plots are possible; this requires the *.cell* file
 to also be available. Otherwise, a total DOS will be obtained by
 summing over the eigenvalue data in the *.bands* file.
 
+ABACUS
+~~~~~~
+
+For ABACUS, provide total DOS output using ``--code abacus``. Newer
+runs may write per-spin files such as ``doss1g1_nao.txt`` and
+``doss2g1_nao.txt``; older runs may provide ``TDOS`` or ``TDOS.dat``; older
+single-file outputs such as ``DOS1_smearing.dat`` and ``dos.txt`` are
+also supported::
+
+  sumo-dosplot --code abacus -f doss1g1_nao.txt
+  sumo-dosplot --code abacus -f TDOS
+  sumo-dosplot --code abacus -f TDOS.dat
+  sumo-dosplot --code abacus -f DOS1_smearing.dat
+  sumo-dosplot --code abacus -f dos.txt
+
+If present, Sumo will also read ``PDOS.dat`` or ``PDOS`` for projected
+DOS, ``STRU`` to map the site/orbital information, and
+``running_nscf.log`` (falling back to ``running_scf.log``) to determine
+the energy reference.
+
+The usual ``--elements``, ``--orbitals``, and ``--atoms`` selection
+options are supported when ``PDOS`` is available.
+
 
 Command-Line Interface
 ----------------------

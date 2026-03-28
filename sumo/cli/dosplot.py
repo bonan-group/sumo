@@ -12,6 +12,7 @@ TODO:
 import argparse
 import logging
 import os
+import re
 import sys
 import warnings
 from glob import glob
@@ -28,6 +29,7 @@ mpl.use("Agg")
 
 import sumo.io.castep
 import sumo.io.questaal
+from sumo.io.abacus import read_dos as read_abacus_dos
 from sumo.electronic_structure.bandstructure import string_to_spin
 from sumo.electronic_structure.dos import load_dos, write_files
 from sumo.plotting.dos_plotter import SDOSPlotter
@@ -85,10 +87,11 @@ def dosplot(
         filename (:obj:`str`, optional): Path to a DOS data file (can be
             gzipped). The preferred file type depends on the electronic
             structure code: vasprun.xml (VASP); *.bands (CASTEP); dos.*
-            (Questaal).
+            (Questaal); doss1*.txt/doss2*.txt, TDOS/TDOS.dat, DOS*_smearing.dat,
+            or dos.txt (ABACUS).
         code (:obj:`str`, optional): Electronic structure code used ('vasp',
-              'castep' or 'questaal'). Note that for Castep only a rough TDOS
-              is available, assembled by sampling the eigenvalues.
+              'castep', 'questaal' or 'abacus'). Note that for Castep only a
+              rough TDOS is available, assembled by sampling the eigenvalues.
         prefix (:obj:`str`, optional): Prefix for file names.
         directory (:obj:`str`, optional): The directory in which to save files.
         elements (:obj:`dict`, optional): The elements and orbitals to extract
@@ -204,6 +207,7 @@ def dosplot(
                 logging.error("ERROR: No vasprun.xml found!")
                 sys.exit()
 
+        _log_selected_paths("DOS input file", [filename])
         dos, pdos = load_dos(
             filename, elements, lm_orbitals, atoms, gaussian, total_only
         )
@@ -221,10 +225,13 @@ def dosplot(
             else:
                 logging.error("ERROR: Too many *.bands files found!")
                 sys.exit()
+        _log_selected_paths("DOS input file", [bands_file])
         pdos_file = _replace_ext(bands_file, "pdos_bin")
         cell_file = _replace_ext(bands_file, "cell")
         pdos_file = pdos_file if os.path.isfile(pdos_file) else None
         cell_file = cell_file if os.path.isfile(cell_file) else None
+        _log_selected_paths("CASTEP PDOS file", [pdos_file])
+        _log_selected_paths("CASTEP cell file", [cell_file])
 
         if not total_only:
             # Check if both pdos_bin and cell files are present.
@@ -292,6 +299,10 @@ def dosplot(
         else:
             site_file = None
 
+        _log_selected_paths("DOS input file", [pdos_file or tdos_file])
+        _log_selected_paths("Questaal total DOS file", [tdos_file])
+        _log_selected_paths("Questaal site file", [site_file])
+
         if shift:
             logging.warning(
                 "Fermi level shift requested, but not implemented for Questaal DOS."
@@ -306,6 +317,34 @@ def dosplot(
             total_only=total_only,
             elements=elements,
             lm_orbitals=lm_orbitals,
+            atoms=atoms,
+        )
+    elif code.lower() == "abacus":
+        if filename:
+            tdos_files = _find_abacus_dos_files(filename)
+        else:
+            tdos_files = _find_abacus_dos_files()
+
+        pdos_file = _find_abacus_related_file(tdos_files[0], ("PDOS.dat", "PDOS"))
+        stru_file = _find_abacus_related_file(tdos_files[0], ("STRU",))
+        log_file = _find_abacus_related_file(
+            tdos_files[0], ("running_nscf.log", "running_scf.log")
+        )
+
+        _log_selected_paths("ABACUS DOS file", tdos_files)
+        _log_selected_paths("ABACUS PDOS file", [pdos_file])
+        _log_selected_paths("ABACUS structure file", [stru_file])
+        _log_selected_paths("ABACUS log file", [log_file])
+
+        dos, pdos = read_abacus_dos(
+            tdos_files,
+            pdos_file=pdos_file,
+            stru_file=stru_file,
+            log_file=log_file,
+            gaussian=gaussian,
+            total_only=total_only,
+            lm_orbitals=lm_orbitals,
+            elements=elements,
             atoms=atoms,
         )
 
@@ -395,6 +434,102 @@ def _replace_ext(string, new_ext):
     return name + "." + new_ext
 
 
+def _find_abacus_dos_files(filename=None):
+    if filename:
+        return _with_abacus_spin_partner(filename)
+
+    new_format_patterns = [
+        "doss1g*_*.txt",
+        os.path.join("OUT.ABACUS", "doss1g*_*.txt"),
+        "doss1*.txt",
+        os.path.join("OUT.ABACUS", "doss1*.txt"),
+    ]
+    for pattern in new_format_patterns:
+        matches = sorted(glob(pattern))
+        if matches:
+            return _with_abacus_spin_partner(matches[0])
+
+    old_format_candidates = [
+        "TDOS",
+        os.path.join("OUT.ABACUS", "TDOS"),
+        "TDOS.dat",
+        os.path.join("OUT.ABACUS", "TDOS.dat"),
+        "dos.txt",
+        os.path.join("OUT.ABACUS", "dos.txt"),
+        "DOS1_smearing.dat",
+        os.path.join("OUT.ABACUS", "DOS1_smearing.dat"),
+    ]
+
+    for candidate in old_format_candidates:
+        if os.path.exists(candidate):
+            return _with_abacus_spin_partner(candidate)
+
+    logging.error(
+        "ERROR: No ABACUS DOS file found (looked for doss1*.txt, TDOS/TDOS.dat, dos.txt, DOS1_smearing.dat)!"
+    )
+    sys.exit()
+
+
+def _with_abacus_spin_partner(tdos_file):
+    partner = _find_abacus_spin_partner(tdos_file)
+    return sorted([tdos_file, partner], key=os.path.basename) if partner else [tdos_file]
+
+
+def _find_abacus_spin_partner(tdos_file):
+    basename = os.path.basename(tdos_file)
+    dirname = os.path.dirname(tdos_file)
+
+    match = re.match(r"^(doss)([12])(.*\.txt)$", basename)
+    if match:
+        partner_index = "1" if match.group(2) == "2" else "2"
+        candidate = os.path.join(
+            dirname, f"{match.group(1)}{partner_index}{match.group(3)}"
+        )
+        if os.path.exists(candidate):
+            return candidate
+
+    partners = {
+        "DOS1_smearing.dat": "DOS2_smearing.dat",
+        "DOS2_smearing.dat": "DOS1_smearing.dat",
+    }
+
+    for source, target in partners.items():
+        candidate = tdos_file.replace(source, target)
+        if candidate != tdos_file and os.path.exists(candidate):
+            return candidate
+
+    if basename in {"TDOS", "TDOS.dat"}:
+        return None
+
+    return None
+
+
+def _find_abacus_related_file(reference_file, filenames):
+    reference_dir = os.path.abspath(os.path.dirname(reference_file))
+    search_dirs = [reference_dir, os.path.dirname(reference_dir)]
+    seen = set()
+
+    for search_dir in search_dirs:
+        if not search_dir or search_dir in seen:
+            continue
+        seen.add(search_dir)
+        for filename in filenames:
+            candidate = os.path.join(search_dir, filename)
+            if os.path.exists(candidate):
+                return candidate
+    return None
+
+
+def _log_selected_paths(label, paths):
+    valid_paths = [path for path in paths if path]
+    if valid_paths:
+        logging.info(f"{label}:")
+        for path in valid_paths:
+            logging.info(f"\t{path}")
+    else:
+        logging.info(f"{label}: None")
+
+
 def _atoms(atoms_string):
     """Parse the atom string.
 
@@ -433,7 +568,7 @@ def _get_parser():
     parser.add_argument(
         "-f",
         "--filename",
-        help="vasprun.xml file to plot",
+        help="input DOS file to plot",
         default=None,
         metavar="F",
     )
@@ -442,7 +577,7 @@ def _get_parser():
         "--code",
         default="vasp",
         metavar="C",
-        help='Input file format: "vasp" (vasprun.xml) or "questaal" (opt.ext)',
+        help='Input file format: "vasp" (vasprun.xml), "questaal" (dos.ext), "castep" (*.bands), or "abacus" (doss*.txt / TDOS / TDOS.dat / DOS*_smearing.dat / dos.txt)',
     )
     parser.add_argument(
         "-p", "--prefix", metavar="P", help="prefix for the files generated"

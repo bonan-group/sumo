@@ -130,6 +130,23 @@ Note: in all cases the arguments are surrounded in parentheses.
 Other codes
 -----------
 
+ABACUS
+~~~~~~
+
+For ABACUS, provide the ``STRU`` file and select the ABACUS backend::
+
+    sumo-kgen --code abacus -p STRU
+
+This writes a file named ``KPT_BANDS`` containing the full explicit band
+path in ``Direct`` coordinates. Each k-point is written explicitly with a
+unit weight, and high-symmetry labels are included as ``#`` comments on the
+corresponding lines so that ``sumo-bandplot --code abacus`` can recover the
+axis labels directly from the file.
+
+ABACUS support in ``sumo-kgen`` writes an explicit path rather than the
+``Line``-mode format. The ``--hybrid``, ``--split``, and ``--cartesian``
+options are therefore not applicable and will be ignored with a warning.
+
 CASTEP
 ~~~~~~
 
