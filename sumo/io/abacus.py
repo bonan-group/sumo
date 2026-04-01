@@ -57,7 +57,9 @@ def read_structure(stru_file):
         return Structure(
             lattice,
             species,
-            np.array(coords, dtype=float) * lattice_constant * _bohr_to_angstrom,
+            _cartesian_coords_from_stru(
+                np.array(coords, dtype=float), coord_type, lattice, lattice_constant
+            ),
             coords_are_cartesian=True,
         )
 
@@ -529,6 +531,7 @@ def _sort_abacus_outputs(filenames):
         patterns = (
             r"[Bb][Aa][Nn][Dd][Ss](\d+)(?:\.\w+)?$",
             r"[Dd][Oo][Ss][Ss](\d+)",
+            r"[Dd][Oo][Ss](\d+)_smearing(?:\.\w+)?$",
             r"_(\d+)(?:\.\w+)?$",
         )
         for pattern in patterns:
@@ -614,22 +617,39 @@ def _deduplicate_band_rows(data, nkpoints, filename):
 def _full_kpath(special_k, numbers):
     special_k = np.array(special_k, dtype=float)
     numbers = np.array(numbers, dtype=int)
-    total_k = int(np.sum(numbers))
-    interval = (np.roll(special_k, -1, axis=0) - special_k) / numbers.reshape(-1, 1)
-    max_num = int(np.max(numbers))
-    span = np.zeros((len(numbers), max_num), dtype=float)
-
-    for i, npts in enumerate(numbers):
-        span[i, :npts] = np.arange(npts)
+    if len(special_k) == 1:
+        return special_k.copy()
 
     coords = []
-    for axis in range(3):
-        values = (
-            interval[:, axis : axis + 1] * span
-            + special_k[:, axis : axis + 1].repeat(max_num, axis=1)
-        ).flatten()[:total_k]
-        coords.append(values)
-    return np.vstack(coords).T
+    for start, end, npts in zip(special_k[:-1], special_k[1:], numbers[:-1]):
+        segment = start + (end - start) * np.arange(npts).reshape(-1, 1) / npts
+        coords.extend(segment.tolist())
+    coords.append(special_k[-1].tolist())
+    return np.array(coords, dtype=float)
+
+
+def _cartesian_coords_from_stru(coords, coord_type, lattice, lattice_constant):
+    if coord_type == "cartesian":
+        return coords * lattice_constant * _bohr_to_angstrom
+    if coord_type == "cartesian_au":
+        return coords * _bohr_to_angstrom
+    if coord_type == "cartesian_angstrom":
+        return coords
+    if coord_type.startswith("cartesian_angstrom_center_"):
+        return coords + _cartesian_center_offset(coord_type, lattice)
+    raise NotImplementedError(f"Unsupported ABACUS coordinate mode '{coord_type}'")
+
+
+def _cartesian_center_offset(coord_type, lattice):
+    centers = {
+        "cartesian_angstrom_center_xy": (0.5, 0.5, 0.0),
+        "cartesian_angstrom_center_xz": (0.5, 0.0, 0.5),
+        "cartesian_angstrom_center_yz": (0.0, 0.5, 0.5),
+        "cartesian_angstrom_center_xyz": (0.5, 0.5, 0.5),
+    }
+    if coord_type not in centers:
+        raise NotImplementedError(f"Unsupported ABACUS coordinate mode '{coord_type}'")
+    return np.dot(np.array(centers[coord_type], dtype=float), lattice.matrix)
 
 
 def _is_metal(bands, efermi):

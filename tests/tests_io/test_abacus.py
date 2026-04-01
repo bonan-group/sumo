@@ -118,6 +118,42 @@ class AbacusIoTestCase(unittest.TestCase):
                 self.assertEqual(structure[0].specie.symbol, "Si")
                 self.assertEqual(len(structure), 2)
 
+    def test_read_structure_cartesian_variants(self):
+        template = """ATOMIC_SPECIES
+Si 28.085 Si.upf
+
+LATTICE_CONSTANT
+2.0
+
+LATTICE_VECTORS
+1.0 0.0 0.0
+0.0 1.0 0.0
+0.0 0.0 1.0
+
+ATOMIC_POSITIONS
+{coord_type}
+Si
+0.0
+1
+1.0 2.0 3.0
+"""
+        expected = {
+            "Cartesian": [1.05835442, 2.11670884, 3.17506326],
+            "Cartesian_au": [0.52917721, 1.05835442, 1.58753163],
+            "Cartesian_angstrom": [1.0, 2.0, 3.0],
+            "Cartesian_angstrom_center_xy": [1.52917721, 2.52917721, 3.0],
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for coord_type, expected_cart in expected.items():
+                with self.subTest(coord_type=coord_type):
+                    stru_file = os.path.join(tmpdir, f"{coord_type}.STRU")
+                    with open(stru_file, "w") as handle:
+                        handle.write(template.format(coord_type=coord_type))
+
+                    structure = read_structure(stru_file)
+                    assert_allclose(structure.cart_coords[0], expected_cart, atol=1e-6)
+
     def test_read_kpoint_labels(self):
         for kpt_file in (self.band_kpt, self.lts_band_kpt):
             with self.subTest(kpt_file=kpt_file):
@@ -127,6 +163,33 @@ class AbacusIoTestCase(unittest.TestCase):
                 self.assertEqual(labels["L"], (0.5, 0.5, 0.5))
                 self.assertEqual(labels["W"], (0.5, 0.25, 0.75))
                 self.assertEqual(labels["X"], (0.5, 0.0, 0.5))
+
+    def test_read_kpoint_labels_line_mode_does_not_close_path(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            kpt_file = os.path.join(tmpdir, "KPT")
+            with open(kpt_file, "w") as handle:
+                handle.write("K_POINTS\n")
+                handle.write("3\n")
+                handle.write("Line\n")
+                handle.write("0.0 0.0 0.0 2 # Gamma\n")
+                handle.write("0.5 0.0 0.0 2 # X\n")
+                handle.write("0.5 0.5 0.0 7 # M\n")
+
+            kpoints, labels = read_kpoint_labels(kpt_file)
+
+            assert_allclose(
+                kpoints,
+                [
+                    [0.0, 0.0, 0.0],
+                    [0.25, 0.0, 0.0],
+                    [0.5, 0.0, 0.0],
+                    [0.5, 0.25, 0.0],
+                    [0.5, 0.5, 0.0],
+                ],
+            )
+            self.assertEqual(labels[r"\Gamma"], (0.0, 0.0, 0.0))
+            self.assertEqual(labels["X"], (0.5, 0.0, 0.0))
+            self.assertEqual(labels["M"], (0.5, 0.5, 0.0))
 
     def test_read_efermi(self):
         self.assertAlmostEqual(read_efermi(self.band_log), 7.0139922244)
@@ -414,6 +477,17 @@ class AbacusIoTestCase(unittest.TestCase):
                 )
                 self.assertIn(Spin.down, dos.densities)
                 self.assertEqual(set(pdos.keys()), {"Si"})
+
+    def test_read_spin_dos_lts_is_order_independent(self):
+        dos_forward, _ = read_dos(self.lts_spin_dos_files, log_file=self.lts_spin_dos_log)
+        dos_reverse, _ = read_dos(
+            list(reversed(self.lts_spin_dos_files)),
+            log_file=self.lts_spin_dos_log,
+        )
+
+        assert_allclose(dos_forward.energies, dos_reverse.energies)
+        assert_allclose(dos_forward.densities[Spin.up], dos_reverse.densities[Spin.up])
+        assert_allclose(dos_forward.densities[Spin.down], dos_reverse.densities[Spin.down])
 
     def test_write_kpoints_bands_roundtrip(self):
         with tempfile.TemporaryDirectory() as tmpdir:
